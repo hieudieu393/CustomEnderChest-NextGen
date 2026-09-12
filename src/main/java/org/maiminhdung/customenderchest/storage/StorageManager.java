@@ -28,7 +28,7 @@ public class StorageManager {
 
     public StorageManager(EnderChest plugin) {
         this.plugin = plugin;
-        
+
         // Bounded executor pool for IO operations
         int threadPoolSize = plugin.config().getInt("storage.pool-settings.max-pool-size", 10);
         this.ioExecutor = Executors.newFixedThreadPool(threadPoolSize, runnable -> {
@@ -57,8 +57,10 @@ public class StorageManager {
                 if (connectH2()) {
                     this.storageImplementation = new H2Storage(this);
                 } else {
-                    plugin.getLogger().severe("H2 connection failed! Falling back to YML storage as a safe default.");
-                    this.storageImplementation = new YmlStorage(this);
+                    // A fallback backend would create a second, empty source of
+                    // truth and can overwrite valid H2 data on later saves.
+                    ioExecutor.shutdownNow();
+                    throw new IllegalStateException("H2 could not be opened. CustomEnderChest refuses to start to protect existing player data.");
                 }
                 break;
             case "yml":
@@ -189,70 +191,38 @@ public class StorageManager {
     }
 
     private boolean connectH2() {
-        return connectH2Internal(true);
-    }
-
-    private boolean connectH2Internal(boolean allowRecovery) {
         try {
             HikariConfig config = new HikariConfig();
             config.setPoolName("CEC-H2-Pool");
             File dbFile = new File(plugin.getDataFolder(), "data/enderchests");
-            config.setJdbcUrl(
-                    "jdbc:h2:" + dbFile.getAbsolutePath() + ";MODE=MySQL;AUTO_RECONNECT=TRUE;LOCK_TIMEOUT=10000");
+            File mvDbFile = new File(dbFile.getAbsolutePath() + ".mv.db");
+            boolean existingDatabase = mvDbFile.isFile();
+            String jdbcUrl = "jdbc:h2:" + dbFile.getAbsolutePath() + ";MODE=MySQL;LOCK_TIMEOUT=10000";
+            // H2 creates a database for a missing path by default. Once a data
+            // file exists, require it to be opened as-is; do not silently replace
+            // it after corruption, a bad path, or a lock error.
+            if (existingDatabase) {
+                jdbcUrl += ";IFEXISTS=TRUE";
+            }
+            config.setJdbcUrl(jdbcUrl);
             config.setDriverClassName("org.maiminhdung.customenderchest.lib.h2.Driver");
-
-            // Pool size settings
             config.setMaximumPoolSize(plugin.config().getInt("storage.pool-settings.max-pool-size", 10));
             config.setMinimumIdle(2);
-
-            // Timeout settings to prevent hanging
-            config.setConnectionTimeout(10000); // 10 seconds to get connection
-            config.setValidationTimeout(5000); // 5 seconds to validate connection
-            config.setIdleTimeout(600000); // 10 minutes idle timeout
-            config.setMaxLifetime(1800000); // 30 minutes max lifetime
-            config.setLeakDetectionThreshold(60000); // Detect connection leaks after 1 minute
-
-            // Keep connections alive
-            config.setKeepaliveTime(300000); // 5 minutes keepalive
-
+            config.setConnectionTimeout(10000);
+            config.setValidationTimeout(5000);
+            config.setIdleTimeout(600000);
+            config.setMaxLifetime(1800000);
+            config.setLeakDetectionThreshold(60000);
+            config.setKeepaliveTime(300000);
             this.dataSource = new HikariDataSource(config);
             return true;
         } catch (Exception e) {
-            // Check if the file is locked (stale lock from crash / reload)
-            if (allowRecovery && isH2FileLockError(e)) {
-                plugin.getLogger().warning("========================================================");
-                plugin.getLogger().warning("H2 DATABASE FILE IS LOCKED!");
-                plugin.getLogger().warning("This usually happens after a server crash or /reload.");
-                plugin.getLogger().warning("Attempting to remove stale lock file...");
-                plugin.getLogger().warning("========================================================");
-
-                if (cleanupStaleLockFile()) {
-                    plugin.getLogger().info("Stale lock file removed. Retrying H2 connection...");
-                    return connectH2Internal(false);
-                } else {
-                    plugin.getLogger().severe("Could not remove lock file. The database may be in use by another process.");
-                    plugin.getLogger().severe("If no other server is running, manually delete: plugins/CustomEnderChest/data/enderchests.mv.db.lock.db");
-                }
-            }
-
-            // Check if the root cause is a corrupted H2 database file
-            if (allowRecovery && isH2CorruptionError(e)) {
-                plugin.getLogger().severe("========================================================");
-                plugin.getLogger().severe("H2 DATABASE FILE IS CORRUPTED!");
-                plugin.getLogger().severe("This usually happens due to a server crash or forced shutdown.");
-                plugin.getLogger().severe("Attempting automatic recovery...");
-                plugin.getLogger().severe("========================================================");
-
-                if (backupCorruptedH2File()) {
-                    plugin.getLogger().info("Corrupted H2 file has been backed up. Retrying with a fresh database...");
-                    return connectH2Internal(false);
-                } else {
-                    plugin.getLogger().severe("Failed to backup corrupted H2 file. Manual intervention required.");
-                    plugin.getLogger().severe("Please manually rename or delete the file: plugins/CustomEnderChest/data/enderchests.mv.db");
-                }
-            }
-
-            plugin.getLogger().severe("H2 connection error: " + e.getMessage());
+            plugin.getLogger().severe("========================================================");
+            plugin.getLogger().severe("H2 DATABASE COULD NOT BE OPENED. STARTUP IS STOPPED TO PROTECT PLAYER DATA.");
+            plugin.getLogger().severe("Do not delete, rename, or replace the H2 file while the server is running.");
+            plugin.getLogger().severe("Restore or recover a copy of plugins/CustomEnderChest/data/enderchests.mv.db instead.");
+            plugin.getLogger().severe("Cause: " + e.getMessage());
+            plugin.getLogger().severe("========================================================");
             ERROR_TRACKER.trackError(e);
             return false;
         }
@@ -374,14 +344,11 @@ public class StorageManager {
      * Close connection when turn off.
      */
     public void close() {
-        if (dataSource != null && !dataSource.isClosed()) {
-            dataSource.close();
-            plugin.getLogger().info("Database connection pool closed.");
-        }
         if (ioExecutor != null && !ioExecutor.isShutdown()) {
             ioExecutor.shutdown();
             try {
-                if (!ioExecutor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS)) {
+                if (!ioExecutor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS)) {
+                    plugin.getLogger().warning("Database worker shutdown timed out; cancelling unfinished writes.");
                     ioExecutor.shutdownNow();
                 }
             } catch (InterruptedException e) {
@@ -389,6 +356,10 @@ public class StorageManager {
                 Thread.currentThread().interrupt();
             }
             plugin.getLogger().info("Database thread pool shut down.");
+        }
+        if (dataSource != null && !dataSource.isClosed()) {
+            dataSource.close();
+            plugin.getLogger().info("Database connection pool closed.");
         }
     }
 

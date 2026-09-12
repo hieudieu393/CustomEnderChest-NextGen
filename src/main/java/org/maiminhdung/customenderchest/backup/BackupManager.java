@@ -83,12 +83,12 @@ public class BackupManager {
                 long startTime = System.currentTimeMillis();
 
                 File backupFile = new File(backupFolder, "backup_" + timestamp + ".zip");
-                
+
                 // Ensure backup folder exists just in case it was deleted while server was running
                 if (!backupFolder.exists()) {
                     backupFolder.mkdirs();
                 }
-                
+
                 plugin.getDebugLogger().log("[Backup] Target file: " + backupFile.getAbsolutePath());
 
                 switch (storageType) {
@@ -222,23 +222,13 @@ public class BackupManager {
 
                 plugin.getLogger().info("[Backup] H2 database backed up successfully using SQL BACKUP command");
             } else {
-                plugin.getLogger().warning("[Backup] H2 BACKUP command did not create expected file");
+                throw new IOException("H2 BACKUP command did not create the expected archive");
             }
 
         } catch (Exception e) {
-            plugin.getLogger().warning("[Backup] H2 SQL BACKUP failed, trying file copy method as fallback...");
-            plugin.getDebugLogger().log("[Backup] Error: " + e.getMessage());
-
-            // Fallback: Try to copy files directly (may fail if database is active)
-            try {
-                backupH2DataFileCopy(backupFile);
-            } catch (Exception e2) {
-                plugin.getLogger().severe("[Backup] Both H2 backup methods failed!");
-                plugin.getLogger().severe("[Backup] This usually means the database is locked by another process.");
-                plugin.getLogger().severe(
-                        "[Backup] Consider increasing backup interval or using MySQL for better backup support.");
-                throw new IOException("Failed to backup H2 database: " + e2.getMessage(), e2);
-            }
+            // Copying a live .mv.db file is not transactionally safe and can create
+            // a backup that looks valid but cannot be restored. Fail loudly instead.
+            throw new IOException("H2 SQL BACKUP failed; no backup was created", e);
         } finally {
             // Ensure temp file is cleaned up
             if (tempBackupFile.exists()) {

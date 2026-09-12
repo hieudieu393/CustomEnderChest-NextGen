@@ -195,6 +195,10 @@ public class StorageManager {
             HikariConfig config = new HikariConfig();
             config.setPoolName("CEC-H2-Pool");
             File dbFile = new File(plugin.getDataFolder(), "data/enderchests");
+            File dataFolder = dbFile.getParentFile();
+            if (!dataFolder.exists() && !dataFolder.mkdirs()) {
+                throw new SQLException("Could not create H2 data directory: " + dataFolder.getAbsolutePath());
+            }
             File mvDbFile = new File(dbFile.getAbsolutePath() + ".mv.db");
             boolean existingDatabase = mvDbFile.isFile();
             String jdbcUrl = "jdbc:h2:" + dbFile.getAbsolutePath() + ";MODE=MySQL;LOCK_TIMEOUT=10000";

@@ -204,22 +204,10 @@ public class BackupManager {
 
             plugin.getDebugLogger().log("[Backup] H2 BACKUP command completed successfully");
 
-            // Now copy the temporary backup to the final backup file
+            // H2 BACKUP already creates a transactionally consistent ZIP archive.
+            // Move it directly so the resulting file is also directly restorable.
             if (tempBackupFile.exists()) {
-                try (ZipOutputStream zos = new ZipOutputStream(Files.newOutputStream(backupFile.toPath()))) {
-                    ZipEntry entry = new ZipEntry("data/h2_database_backup.zip");
-                    zos.putNextEntry(entry);
-                    Files.copy(tempBackupFile.toPath(), zos);
-                    zos.closeEntry();
-
-                    plugin.getDebugLogger().log("[Backup] H2 backup added to backup archive");
-                }
-
-                // Clean up temporary file
-                if (tempBackupFile.delete()) {
-                    plugin.getDebugLogger().log("[Backup] Temporary backup file deleted");
-                }
-
+                Files.move(tempBackupFile.toPath(), backupFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
                 plugin.getLogger().info("[Backup] H2 database backed up successfully using SQL BACKUP command");
             } else {
                 throw new IOException("H2 BACKUP command did not create the expected archive");

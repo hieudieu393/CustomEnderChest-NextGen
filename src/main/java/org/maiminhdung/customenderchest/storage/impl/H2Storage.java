@@ -57,6 +57,7 @@ public class H2Storage implements StorageInterface {
             EnderChest.getInstance().getLogger().severe("Failed to initialize H2 table!");
             e.printStackTrace();
             ERROR_TRACKER.trackError(e);
+            throw new IllegalStateException("Cannot initialize EnderChest storage", e);
         }
 
         // Overflow storage table
@@ -73,6 +74,7 @@ public class H2Storage implements StorageInterface {
             EnderChest.getInstance().getLogger().severe("Failed to initialize overflow table!");
             e.printStackTrace();
             ERROR_TRACKER.trackError(e);
+            throw new IllegalStateException("Cannot initialize EnderChest overflow storage", e);
         }
     }
 

@@ -17,6 +17,11 @@ Yêu cầu mới thay thế cách xử lý khởi động của bản vá cũ:
 quản trị/phục hồi hoạt động.** Không đồng nghĩa với việc vẫn cho chuyển đồ khi
 chưa thể lưu an toàn.
 
+Bổ sung yêu cầu người dùng: **khi player mở Ender Chest, đồ đã có phải được giữ
+nguyên; lỗi đọc dữ liệu không được biến thành rương trống.** Có bản dữ liệu tốt
+đã xác thực thì ưu tiên tiếp tục hiển thị đồ, thay vì mặc định chặn mọi lần mở.
+Đây là tiêu chí cần triển khai và kiểm thử, chưa phải tính năng đã hoàn tất.
+
 Chưa có database, log hoặc cấu hình thực tế của server, nên chưa xác định được
 nguyên nhân của sự cố đã xảy ra. H2 có cơ chế thu gọn và tái sử dụng vùng trống;
 file nhỏ đi không tự chứng minh bản ghi đã bị xóa. Phải đối chiếu UUID, dữ liệu
@@ -105,21 +110,70 @@ Tài liệu cấu hình: [Gradle JVM tests](https://docs.gradle.org/current/user
 
 | Tình huống | Người chơi | Plugin / quản trị | Điều kiện mở lại |
 | --- | --- | --- | --- |
-| Một UUID có dữ liệu hỏng | Chặn mở/sửa/claim/import với UUID đó; không hiện rương trống | Người khác dùng bình thường, ghi nhận lỗi không spam | Bản dữ liệu phục hồi được kiểm tra và xác nhận |
+| Một UUID có dữ liệu hỏng | Có bản tốt đã xác thực: mở bản xem được bảo vệ, giữ đồ; chưa có: báo đang phục hồi, không mở rương trống; chặn sửa/claim/import | Người khác dùng bình thường, giữ dữ liệu gốc và thử tìm bản tốt | Bản phục hồi được đối soát; xác nhận lưu an toàn mới cho chuyển đồ |
 | H2 bị khóa/mất kết nối khi khởi động | Tạm chặn toàn bộ thao tác rương tùy chỉnh | Plugin vẫn enabled; listener chặn truy cập và lệnh chẩn đoán còn hoạt động | Kết nối lại đúng database, kiểm tra schema và dữ liệu chờ |
 | Database lỗi khi đang dùng | Ngừng nhận thao tác chuyển đồ mới; không hoàn nguyên mù quáng các thay đổi đã nhận | Giữ snapshot đã tin cậy và nhật ký chờ lưu; báo trạng thái bảo vệ | Đối soát revision và commit mọi thay đổi hợp lệ |
 | Chỉ backup lỗi | Rương bình thường nếu storage vẫn khỏe | Báo backup lỗi, giữ bản tốt cũ, thử lại có giới hạn | Backup mới được kiểm chứng |
 | Nhật ký/ổ đĩa đầy hoặc không ghi được | Chặn thao tác trước khi nhận thêm thay đổi | Plugin vẫn chạy nhưng không hứa “đã lưu”; cảnh báo rõ | Khôi phục nơi lưu bền vững và đối soát |
 
 Không cho rơi về rương vanilla, không tự chuyển sang YML/database trống để ghi.
-Ban đầu ưu tiên **không mở GUI có thể sửa** khi lỗi. Nếu cần xem chỉ đọc về sau,
-phải chặn đủ click, drag, shift-click, hotbar, double-click, drop và các API ghi.
+Khi lỗi, **không mở GUI có thể sửa**, nhưng phải hỗ trợ xem đồ từ bản tốt đã xác
+thực ngay trong đợt triển khai này. Bản xem bảo vệ phải chặn đủ click, drag,
+shift-click, hotbar, double-click, drop, phím đổi tay và các API ghi. Không cho
+autosave hoặc sự kiện đóng GUI ghi bản xem này đè lên dữ liệu nguồn.
+
+### Bổ sung ưu tiên P0: giữ đồ khi player mở rương có dữ liệu lỗi
+
+**Mục tiêu:** đồ không biến mất khỏi rương vì lỗi đọc/giải mã; vẫn giữ đúng slot,
+số lượng và thuộc tính. Việc hiển thị được đồ và việc cho phép lấy/cất đồ là hai
+điều kiện khác nhau: có thể xem bản được bảo vệ trong lúc phục hồi, nhưng chỉ
+chuyển đồ khi xác nhận được trạng thái hiện tại và khả năng lưu an toàn.
+
+1. **Đã tải được đồ trước khi lỗi:** giữ nguyên trạng thái đáng tin của phiên
+   hiện tại; tạo bản chụp sâu trên đúng thread. Load/retry thất bại không được
+   gọi `clear`, ghi `AIR`, thay cache bằng mảng rỗng hoặc hoàn nguyên về bản cũ.
+   Chuyển sang chế độ bảo vệ trước khi nhận thêm thao tác. Xử lý cả item đang ở
+   con trỏ; không đóng/mở GUI mù quáng làm rơi hoặc trả item sai chỗ.
+2. **Mở lại sau restart, nguồn chính hỏng:** tìm bản chụp bền vững hợp lệ theo UUID,
+   ID database, định dạng, checksum và revision, rồi đối chiếu nhật ký các lần
+   thay đổi. Chỉ bản tái dựng có căn cứ mới được coi là trạng thái hiện tại.
+   Không chọn bản chỉ vì tên file/thời gian mới nhất; không tự đọc rương vanilla.
+3. **Chỉ có backup cũ:** có thể hiển thị rõ là “bản phục hồi tại thời điểm …”,
+   chỉ đọc, không coi đó là đồ hiện tại và không tự phát lại đồ từng được lấy ra.
+   Thiếu lịch sử hoặc có giao dịch chưa rõ kết quả thì cần đối soát trước khi
+   mở sửa; việc dùng bản cũ làm dữ liệu chính phải được xác nhận khi có rủi ro.
+4. **Một item/slot không giải mã được:** không chuyển thành slot trống rồi lưu
+   phần còn đọc được. Giữ nguyên payload lỗi và các bản tốt. Ưu tiên bản đầy đủ
+   đã xác thực; nếu không thể khôi phục slot đó thì ghi rõ chưa phục hồi được,
+   giữ khóa ghi, không tự xóa hoặc tạo item thay thế để giả vờ đầy đủ dữ liệu.
+5. **Nguồn lưu đã phục hồi:** đối soát main, overflow, nhật ký và phiên hiện tại;
+   kiểm tra tổng đồ/thuộc tính và revision, commit trạng thái đã xác nhận, rồi
+   mới bỏ khóa thao tác. Không chép bản backup đè thẳng lên dữ liệu mới.
+6. **Không có bản tốt nào:** không có cơ sở tái tạo chính xác item đã mất. Thông
+   báo “Dữ liệu rương đang được phục hồi”, giữ nguyên bằng chứng, thông báo admin;
+   không mở rương trống và không tuyên bố đã cứu đủ đồ. Plugin vẫn hoạt động.
+
+Bản dự phòng theo UUID phải được duy trì **trước khi xảy ra lỗi**: lưu revision,
+checksum, main và overflow nhất quán; xuất bản snapshot bằng ghi tạm + đồng bộ
+xuống đĩa + đổi tên nguyên tử khi được hỗ trợ. Nếu nền tảng không hỗ trợ, dùng
+giao thức ghi có thể kiểm chứng; không giả định một thao tác đổi tên là đủ.
+Chỉ xoay vòng bản cũ sau khi bản mới được xác thực; giới hạn dung lượng nhưng
+không xóa bản tốt duy nhất hoặc bằng chứng của UUID đang lỗi.
+
+Thông báo dự kiến:
+
+- Có bản hiện tại đã xác thực: “Đồ của bạn vẫn được giữ. Rương đang được bảo vệ,
+  tạm thời chỉ xem được trong lúc khôi phục lưu dữ liệu.”
+- Chỉ có bản cũ: “Đang xem bản phục hồi lúc …, chưa xác nhận là dữ liệu hiện tại.”
+- Không có bản đọc được: “Dữ liệu rương đang được phục hồi. Vui lòng báo quản trị viên.”
+
+Không thông báo “rương trống”, “đã lưu” hoặc “đã khôi phục đầy đủ” khi chưa chứng minh được.
 
 ### Trạng thái và phục hồi
 
 - Toàn hệ thống: `STARTING → HEALTHY`; lỗi storage chuyển `DEGRADED`;
   thử lại chuyển `RECOVERING`; chỉ về `HEALTHY` sau kiểm tra/đối soát.
-- Từng UUID: `LOADING`, `READY`, `BLOCKED`, `PENDING_SAVE`; chỉ `READY`
+- Từng UUID: `LOADING`, `READY`, `PROTECTED_VIEW`, `BLOCKED`, `PENDING_SAVE`; chỉ `READY`
   được phép thay đổi, tùy trạng thái toàn hệ thống.
 - Kết nối lại một tác vụ duy nhất, backoff có jitter, ví dụ 5s → 10s → 20s → tối đa
   60s; không giữ main/region thread chờ IO. Lỗi cấu hình/quyền ghi/dữ liệu hỏng
@@ -142,6 +196,7 @@ phải chặn đủ click, drag, shift-click, hotbar, double-click, drop và cá
 | 1 — Duy trì plugin an toàn | Tách lifecycle storage khỏi onEnable; đăng ký lệnh/listener bảo vệ sớm; thêm health state, storage facade trả lỗi có kiểu, retry có giới hạn | Lỗi mở H2 không tắt plugin, không truy cập rương vanilla, không tạo kho trống |
 | 2 — Dữ liệu lỗi và thứ tự ghi | Phân biệt missing/empty/corrupt/unavailable cho main+overflow; propagate mọi lỗi; tách pending/queue; clone sâu đúng thread; session/revision/owner lock | R02/R03/R06/R07/R09 hết; test out-of-order và stale callback đạt |
 | 3 — Giao dịch và nhật ký bền vững | Main+overflow cùng transaction, operation ID và revision; journal snapshot/intent bền vững, giới hạn dung lượng; đợi cả dữ liệu người đã quit | Crash tại từng điểm không mất/nhân đôi đồ, không báo thành công trước commit |
+| 3A — Giữ đồ khi nguồn chính lỗi (P0) | Bản tốt theo UUID có revision/checksum; tái dựng từ nhật ký; GUI xem được bảo vệ; phục hồi có đối soát | Đồ đang có không bị clear/đổi AIR; bản cũ không được phát lại tự động; chỉ mở sửa sau xác nhận lưu |
 | 4 — Admin, import, migration, hết hạn | Một writer cho mỗi UUID; mọi đường ghi đi chung guard/queue; pause hết hạn khi dữ liệu lỗi; ngăn admin snapshot cũ ghi đè | Hai admin, player và tác vụ nền cùng thao tác không phá dữ liệu |
 | 5 — Backup và recovery | Backup single-flight, tên tạm riêng, dùng backend thực tế; verify archive và restore trong thư mục riêng; giữ bản tốt gần nhất | Backup lỗi không xóa bản tốt; restore kiểm tra được UUID/slot/item/hash |
 | 6 — Server test và nghiệm thu | Chạy trên bản sao cô lập, cùng phiên bản Paper/Folia và plugin phụ của server; xác nhận số lượng+metadata đồ trước/sau lỗi | CI đạt + báo cáo test thật + không còn P0/P1 dữ liệu chưa giải quyết |
@@ -160,7 +215,8 @@ Không hứa “exactly once” chỉ bằng một transaction H2.
 
 1. Khởi động khi file H2 bị khóa, thiếu, hỏng hoặc hết quyền ghi: plugin còn enabled,
    lệnh health hoạt động, không đổi tên/xóa/tạo thay thế file nguồn.
-2. Một player lỗi payload: chỉ player đó bị khóa; player khác đọc/ghi bình thường.
+2. Một player lỗi payload: chỉ khóa sửa của player đó, giữ bản xem đồ nếu có bản tốt;
+   player khác đọc/ghi bình thường.
 3. Mất kết nối trong lúc mở rương: không nhận thêm chuyển đồ, không có GUI vanilla
    dự phòng; dữ liệu chờ được đối soát trước khi mở lại.
 4. Các thao tác click/drag/hotbar/claim/admin/import/API đều tuân thủ trạng thái bảo vệ.
@@ -182,6 +238,25 @@ Không hứa “exactly once” chỉ bằng một transaction H2.
     chính sách xóa trong đợt điều tra.
 14. Paper và Folia: không đọc/sửa inventory sai thread; callback khi entity đã rời
     server vẫn kết thúc tác vụ và giải phóng đúng tài nguyên.
+15. Đang mở rương có item thật rồi ép lỗi đọc/SQL: đồ không biến thành AIR, không
+    đổi slot/số lượng/thuộc tính; item trên con trỏ được bảo toàn; không cho chuyển
+    đồ trong chế độ bảo vệ; close/autosave không ghi rương trống.
+16. Restart với dữ liệu chính hỏng và snapshot/journal hợp lệ: mở bản phục hồi đúng
+    revision; so sánh từng slot, lượng đồ và metadata với trạng thái đã xác nhận.
+17. Snapshot mới nhất hỏng checksum: không sử dụng; kiểm tra bản trước cùng nhật ký.
+    Không đủ lịch sử thì chỉ xem bản cũ có nhãn thời điểm, không mở sửa tự động.
+18. Đồ đã lấy ra sau lần backup: khôi phục không làm đồ đó xuất hiện lần hai. Đồ
+    đã cất sau backup phải tái dựng từ nhật ký hoặc được giữ ở trạng thái chờ đối soát.
+19. Hỏng đúng một slot: dữ liệu gốc slot đó không bị xóa, phần đọc được không tự
+    ghi đè cả rương; không dùng item giả để báo phục hồi thành công.
+20. Không có snapshot đọc được: không mở GUI trống, không ghi đè file/bản ghi lỗi;
+    plugin còn enabled và admin nhận thông báo đúng tình trạng.
+21. Hai lần mở/retry cùng lúc và admin mở rương đang phục hồi: không tạo hai nguồn
+    ghi, không nhả khóa sớm và không lưu bản xem/backup cũ thành dữ liệu mới.
+
+Các mục 15–21 là **yêu cầu test bổ sung chưa viết/chưa chạy**, không nằm trong
+26 lượt test ban đầu của CI. Nghiệm thu chỉ đạt khi các mục này được thực hiện
+với item thật; hiển thị lại một bản backup cũ không đủ chứng minh không mất đồ.
 
 ## 6. Quy tắc triển khai thử
 

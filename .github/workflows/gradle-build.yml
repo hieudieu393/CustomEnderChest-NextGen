@@ -1,79 +1,59 @@
-name: Gradle Build
+name: Data Safety CI
 
 on:
   push:
-    branches:
-      - 'master'
-      - 'dev'
-    paths-ignore:
-      - '**.md'
-      - '.gitignore'
-      - 'LICENSE'
+    branches: [master, dev, 'fix/**']
   pull_request:
-    branches:
-      - 'master'
-      - 'dev'
-    paths-ignore:
-      - '**.md'
-      - '.gitignore'
-      - 'LICENSE'
+    branches: [master, dev]
   workflow_dispatch:
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+permissions:
+  contents: read
 
+concurrency:
+  group: data-safety-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  acceptance:
+    name: Java 21 - data safety
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-
+          persist-credentials: false
       - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
+          distribution: temurin
           java-version: '21'
-          distribution: 'temurin'
-          cache: gradle
-
       - name: Validate Gradle wrapper
         uses: gradle/actions/wrapper-validation@v4
-
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-
-      - name: Make Gradle wrapper executable
-        run: chmod +x ./gradlew
-
-      - name: Build with Gradle
-        run: ./gradlew build --no-daemon
-
-      - name: Run tests
-        run: ./gradlew test --no-daemon
-
-      - name: Extract version
-        id: extract_version
-        run: |
-          VERSION=$(grep 'version =' build.gradle | head -n 1 | awk -F "'" '{print $2}')
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          COMMIT_SHA_SHORT=$(git rev-parse --short HEAD)
-          echo "COMMIT_SHA_SHORT=$COMMIT_SHA_SHORT" >> $GITHUB_ENV
-          echo "Version: $VERSION (Commit: $COMMIT_SHA_SHORT)"
-
-      - name: Upload JAR artifact
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+      - name: Build and run real regression tests
+        run: bash ./gradlew clean build --no-daemon --stacktrace --console=plain
+      - name: Verify tests ran and verify shaded plugin
+        run: python3 scripts/ci/verify_artifacts.py
+      - name: Upload test reports even on failure
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: CustomEnderChest-NextGen-${{ env.VERSION }}
-          path: build/libs/CustomEnderChest-NextGen-${{ env.VERSION }}.jar
-          retention-days: 90
+          name: test-reports-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            build/test-results/test/
+            build/reports/tests/test/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload candidate only after all gates pass
+        uses: actions/upload-artifact@v4
+        with:
+          name: candidate-NOT-PRODUCTION-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            build/libs/CustomEnderChest-NextGen-*.jar
+            build/libs/SHA256SUMS
           if-no-files-found: error
-
-      - name: Upload test reports on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-reports-${{ env.COMMIT_SHA_SHORT }}
-          path: build/reports/tests/
-          retention-days: 7
+          retention-days: 14

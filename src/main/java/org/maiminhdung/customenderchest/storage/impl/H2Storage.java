@@ -57,6 +57,7 @@ public class H2Storage implements StorageInterface {
             EnderChest.getInstance().getLogger().severe("Failed to initialize H2 table!");
             e.printStackTrace();
             ERROR_TRACKER.trackError(e);
+            throw new IllegalStateException("Cannot initialize EnderChest storage", e);
         }
 
         // Overflow storage table
@@ -73,6 +74,7 @@ public class H2Storage implements StorageInterface {
             EnderChest.getInstance().getLogger().severe("Failed to initialize overflow table!");
             e.printStackTrace();
             ERROR_TRACKER.trackError(e);
+            throw new IllegalStateException("Cannot initialize EnderChest overflow storage", e);
         }
     }
 
@@ -82,72 +84,27 @@ public class H2Storage implements StorageInterface {
             String sql = "SELECT chest_data FROM " + tableName + " WHERE player_uuid = ?";
             try (Connection conn = storageManager.getConnection();
                     PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setQueryTimeout(10); // 10 second query timeout
+                ps.setQueryTimeout(10);
                 ps.setString(1, playerUUID.toString());
                 try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        String data = rs.getString("chest_data");
-                        try {
-                            ItemStack[] items = ItemSerializer.fromBase64(data);
-
-                            // Auto-save migrated data in new format
-                            if (items != null && items.length > 0) {
-                                try {
-                                    String newData = ItemSerializer.toBase64(items);
-                                    if (!newData.equals(data)) {
-                                        EnderChest.getInstance().getLogger().info(
-                                                "[Migration] Auto-saving migrated data for player " + playerUUID);
-                                        autoSaveMigratedData(playerUUID, newData);
-                                    }
-                                } catch (Exception e) {
-                                    // Ignore save errors, data is already loaded successfully
-                                }
-                            }
-
-                            return items;
-                        } catch (Exception e) {
-                            EnderChest.getInstance().getLogger().warning(
-                                    "Failed to deserialize enderchest data for player " + playerUUID + ": "
-                                            + e.getMessage());
-                            return new ItemStack[0];
-                        }
+                    if (!rs.next()) {
+                        return null;
+                    }
+                    String data = rs.getString("chest_data");
+                    try {
+                        // Reads must never mutate stored data. A failed decode is
+                        // propagated so callers cannot save an empty replacement.
+                        return ItemSerializer.fromBase64(data);
+                    } catch (Exception e) {
+                        throw new java.util.concurrent.CompletionException(
+                                "Refusing to load invalid enderchest data for " + playerUUID, e);
                     }
                 }
             } catch (Exception e) {
-                // Log detailed error for database issues
-                String errorMsg = e.getMessage();
-                if (errorMsg != null && (errorMsg.contains("corrupted") || errorMsg.contains("MVStoreException"))) {
-                    EnderChest.getInstance().getLogger().severe(
-                            "[H2Storage] Database file appears to be corrupted! Player: " + playerUUID +
-                                    ". Consider restoring from backup or deleting the database file to recreate.");
-                } else {
-                    EnderChest.getInstance().getLogger().severe(
-                            "[H2Storage] Failed to load enderchest for " + playerUUID + ": " + errorMsg);
-                }
-                // Only print full stack trace in debug mode
-                if (EnderChest.getInstance().config().getBoolean("general.debug")) {
-                    e.printStackTrace();
-                }
+                EnderChest.getInstance().getLogger().severe(
+                        "[H2Storage] Failed to load enderchest for " + playerUUID + ": " + e.getMessage());
                 ERROR_TRACKER.trackError(e);
                 throw new java.util.concurrent.CompletionException(e);
-            }
-            return null;
-        }, ioExecutor);
-    }
-
-    /**
-     * Auto-save migrated data in background
-     */
-    private void autoSaveMigratedData(UUID playerUUID, String newData) {
-        CompletableFuture.runAsync(() -> {
-            try (Connection conn = storageManager.getConnection();
-                    PreparedStatement ps = conn.prepareStatement(
-                            "UPDATE " + tableName + " SET chest_data = ? WHERE player_uuid = ?")) {
-                ps.setString(1, newData);
-                ps.setString(2, playerUUID.toString());
-                ps.executeUpdate();
-            } catch (Exception e) {
-                EnderChest.getInstance().getLogger().warning("Failed to auto-save migrated data: " + e.getMessage());
             }
         }, ioExecutor);
     }

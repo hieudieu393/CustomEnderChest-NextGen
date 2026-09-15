@@ -29,6 +29,10 @@ import java.util.logging.Logger;
 public final class ItemSerializer {
 
     private static final Logger LOGGER = Logger.getLogger(ItemSerializer.class.getName());
+    // Ender chests use at most 54 slots, but overflow can hold more. Keep the
+    // reader and writer limits identical so a valid write can always be read.
+    private static final int MAX_SERIALIZED_SLOTS = 4096;
+    private static final int MAX_ITEM_BYTES = 1_000_000;
 
     /**
      * Serialize ItemStack array to Base64 string using Paper's data component API
@@ -42,6 +46,9 @@ public final class ItemSerializer {
     public static String toBase64(ItemStack[] items) throws IOException {
         if (items == null || items.length == 0) {
             return "";
+        }
+        if (items.length > MAX_SERIALIZED_SLOTS) {
+            throw new IOException("Too many serialized slots: " + items.length);
         }
 
         try (ByteArrayOutputStream outputStream = new ByteArrayOutputStream();
@@ -89,8 +96,7 @@ public final class ItemSerializer {
         try {
             bytes = Base64.getDecoder().decode(data);
         } catch (IllegalArgumentException e) {
-            LOGGER.log(Level.WARNING, "Invalid Base64 data, returning empty inventory");
-            return new ItemStack[0];
+            throw new IOException("Invalid Base64 enderchest payload", e);
         }
 
         // Try to detect format by reading first 4 bytes (array length)
@@ -99,10 +105,9 @@ public final class ItemSerializer {
 
             int firstInt = peekInput.readInt();
 
-            // If the first integer is reasonable (0-256), it's likely new format
-            // If it's unreasonable (like -1393754107), it's old BukkitObjectInputStream
-            // format
-            if (firstInt >= 0 && firstInt <= 256) {
+            // The current binary format starts with its slot count. Legacy Bukkit
+            // streams start with an unrelated negative magic value.
+            if (firstInt >= 0 && firstInt <= MAX_SERIALIZED_SLOTS) {
                 // Try new format first
                 try {
                     return deserializeNewFormat(bytes);
@@ -116,8 +121,7 @@ public final class ItemSerializer {
                 return deserializeLegacyFormat(bytes);
             }
         } catch (Exception e) {
-            LOGGER.log(Level.SEVERE, "Failed to detect data format", e);
-            return new ItemStack[0];
+            throw new IOException("Unable to decode enderchest payload", e);
         }
     }
 
@@ -130,8 +134,9 @@ public final class ItemSerializer {
 
             int length = dataInput.readInt();
 
-            // Sanity check - reasonable inventory size (max 256 slots)
-            if (length < 0 || length > 256) {
+            // Keep this aligned with the writer. Overflow storage can be larger
+            // than a normal 54-slot Ender Chest.
+            if (length < 0 || length > MAX_SERIALIZED_SLOTS) {
                 throw new IOException("Invalid array length: " + length);
             }
 
@@ -144,12 +149,8 @@ public final class ItemSerializer {
                 if (hasItem) {
                     int itemBytesLength = dataInput.readInt();
 
-                    // Sanity check for item data size (max 1MB per item)
-                    if (itemBytesLength < 0 || itemBytesLength > 1_000_000) {
-                        LOGGER.log(Level.WARNING,
-                                "Invalid item data size at slot " + i + ": " + itemBytesLength + ", skipping item");
-                        items[i] = null;
-                        continue;
+                    if (itemBytesLength < 0 || itemBytesLength > MAX_ITEM_BYTES) {
+                        throw new IOException("Invalid item data size at slot " + i + ": " + itemBytesLength);
                     }
 
                     byte[] itemBytes = new byte[itemBytesLength];
@@ -160,8 +161,7 @@ public final class ItemSerializer {
                         // to upgrade old component formats (e.g., <1.21.4 -> 1.21.5)
                         items[i] = ItemStack.deserializeBytes(itemBytes);
                     } catch (Exception e) {
-                        LOGGER.log(Level.WARNING, "Failed to deserialize item at slot " + i + ": " + e.getMessage());
-                        items[i] = null;
+                        throw new IOException("Failed to deserialize item at slot " + i, e);
                     }
                 } else {
                     items[i] = null;
@@ -235,15 +235,15 @@ public final class ItemSerializer {
             LOGGER.log(Level.SEVERE, "5. Then upgrade server to 1.21.5+");
             LOGGER.log(Level.SEVERE, "");
             LOGGER.log(Level.SEVERE, "CURRENT STATUS:");
-            LOGGER.log(Level.SEVERE, "Player will receive EMPTY enderchest.");
-            LOGGER.log(Level.SEVERE, "Old data is preserved in database but cannot be loaded.");
+            LOGGER.log(Level.SEVERE, "The payload is locked from loading and will not be overwritten.");
+            LOGGER.log(Level.SEVERE, "Old data remains preserved in storage for recovery.");
             LOGGER.log(Level.SEVERE, "=================================================================");
             LOGGER.log(Level.SEVERE, "Error details:", e);
 
             // Notify OPs about the failure
             notifyOpsAboutConversionFailure();
 
-            return new ItemStack[0];
+            throw new IOException("Failed to migrate legacy enderchest payload", e);
         }
     }
 
@@ -267,7 +267,7 @@ public final class ItemSerializer {
                         op.sendMessage(prefix.append(Text.parse("<bold><dark_red>CRITICAL ERROR!")));
                         op.sendMessage(
                                 prefix.append(Text.parse("<red>Failed to migrate player data from old format!")));
-                        op.sendMessage(prefix.append(Text.parse("<red>Player received empty enderchest.")));
+                        op.sendMessage(prefix.append(Text.parse("<red>Player data was protected and was not loaded.")));
                         op.sendMessage(Component.empty());
                         op.sendMessage(prefix.append(Text.parse("<bold><yellow>TO FIX:")));
                         op.sendMessage(prefix.append(Text.parse("<yellow>1. Downgrade server to 1.21.4")));

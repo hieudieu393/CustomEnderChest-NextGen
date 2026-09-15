@@ -30,7 +30,7 @@ public class PlayerListener implements Listener {
 
     private final EnderChest plugin;
     private final DebugLogger debug;
-    
+
     /**
      * Tracks which enderchest block each player interacted with.
      * Used to play the close animation when the inventory is closed.
@@ -290,7 +290,6 @@ public class PlayerListener implements Listener {
                 // Save to database async with timeout - DO NOT block!
                 String finalTargetName = targetName;
                 manager.saveEnderChest(targetUUID, finalTargetName, closedInventory)
-                        .orTimeout(10, java.util.concurrent.TimeUnit.SECONDS)
                         .whenComplete((result, ex) -> {
                             if (ex != null) {
                                 plugin.getLogger().warning(
